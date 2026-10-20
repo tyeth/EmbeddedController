@@ -1,0 +1,90 @@
+name: Fork build (tulip, hosted runner)
+
+# Self-contained tulip EC build for forks without the Framework
+# self-hosted build server. Mirrors .github/workflows/zephyr-build.yml
+# (matrix entry: name tulip, ver 3.2.0, zephyr_ref fwk-main,
+# cmsis_ref cros/chromeos-main) but assembles the checkout and
+# toolchain on a hosted ubuntu runner instead of the pre-provisioned
+# ChromiumOS chroot, following docs/zephyr/out_of_chroot.md.
+
+on:
+  push:
+    branches:
+      - test-*
+  workflow_dispatch:
+
+jobs:
+  build-tulip:
+    runs-on: ubuntu-latest
+    env:
+      ZEPHYR_SDK_VERSION: 0.16.8
+      TULIP_VER: "3.2.0"
+    steps:
+      - name: Checkout EC (this ref)
+        uses: actions/checkout@v4
+        with:
+          path: modules/ec
+
+      - name: Checkout Framework zephyr (fwk-main)
+        uses: actions/checkout@v4
+        with:
+          repository: FrameworkComputer/zephyr
+          ref: fwk-main
+          path: deps/zephyr
+          fetch-depth: 1
+
+      - name: Checkout CMSIS (cros chromeos-main)
+        run: |
+          git clone --depth 1 -b chromeos-main \
+            https://chromium.googlesource.com/chromiumos/third_party/zephyr/cmsis \
+            "$GITHUB_WORKSPACE/modules/cmsis"
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build device-tree-compiler \
+            flex bison swig python3-dev
+
+      - name: Install zmake and python deps
+        run: |
+          python3 -m pip install --user "$GITHUB_WORKSPACE/modules/ec/zephyr/zmake"
+          python3 -m pip install --user pyelftools pyyaml packaging pykwalify colorama pylibfdt
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install binman (u-boot tools)
+        run: |
+          git clone --depth 1 https://github.com/u-boot/u-boot.git "$GITHUB_WORKSPACE/deps/u-boot"
+          echo "TOOL_PATH_binman=$GITHUB_WORKSPACE/deps/u-boot/tools/binman/binman" >> "$GITHUB_ENV"
+
+      - name: Install Zephyr SDK (arm toolchain + host tools)
+        run: |
+          cd "$GITHUB_WORKSPACE/deps"
+          wget -q "https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${ZEPHYR_SDK_VERSION}/zephyr-sdk-${ZEPHYR_SDK_VERSION}_linux-x86_64_minimal.tar.xz"
+          tar xf "zephyr-sdk-${ZEPHYR_SDK_VERSION}_linux-x86_64_minimal.tar.xz"
+          cd "zephyr-sdk-${ZEPHYR_SDK_VERSION}"
+          ./setup.sh -t arm-zephyr-eabi -h -c
+          echo "ZEPHYR_SDK_INSTALL_DIR=$GITHUB_WORKSPACE/deps/zephyr-sdk-${ZEPHYR_SDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build tulip (versioned)
+        working-directory: modules/ec
+        run: |
+          zmake -D \
+            --zephyr-base "$GITHUB_WORKSPACE/deps/zephyr" \
+            --modules-dir "$GITHUB_WORKSPACE/modules" \
+            build -t zephyr -v "$TULIP_VER" tulip
+
+      - name: File sha256
+        run: sha256sum modules/ec/build/zephyr/tulip/output/ec.bin
+
+      - name: Check version embedded in binary
+        run: |
+          strings modules/ec/build/zephyr/tulip/output/ec.bin | grep tulip | tee bin-strings.txt
+          grep "$(echo "$GITHUB_SHA" | cut -c1-7)" bin-strings.txt
+
+      - name: Generate artifact version
+        run: echo "VERSIONINFO=$(date -u +'%Y-%m-%d-%H-%M-%S')_$GITHUB_SHA" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tulip.${{ env.VERSIONINFO }}
+          path: modules/ec/build/zephyr/tulip/output
